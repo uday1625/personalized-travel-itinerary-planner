@@ -2,9 +2,11 @@ import json
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from ai_engine import generate_itinerary
+from itinerary_service import DayPlan, ItineraryBuilder
+from llm_provider import GroqProvider
 from models import TripCreate
 from prompt_engine import build_itinerary_prompt
 
@@ -24,6 +26,19 @@ class TripResponse(TripCreate):
 
 class GenerateItineraryRequest(BaseModel):
     trip_id: UUID
+
+
+class BuildItineraryRequest(BaseModel):
+    trip_id: UUID | None = None
+    prompt: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_input(self) -> "BuildItineraryRequest":
+        if (self.trip_id is None) == (self.prompt is None):
+            raise ValueError("Provide exactly one of trip_id or prompt")
+        if self.prompt is not None and not self.prompt.strip():
+            raise ValueError("prompt must not be empty")
+        return self
 
 
 class ItineraryActivity(BaseModel):
@@ -90,6 +105,50 @@ def generate_itinerary_for_trip(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="The itinerary generator returned an invalid itinerary",
+        ) from error
+
+
+@router.post(
+    "/build-itinerary",
+    response_model=list[DayPlan],
+)
+async def build_itinerary(
+    request: BuildItineraryRequest,
+) -> list[DayPlan]:
+    """Build a structured itinerary from a saved trip or a supplied prompt."""
+    if request.prompt is not None:
+        prompt = request.prompt
+    else:
+        trip = _mock_trips.get(request.trip_id)
+        if trip is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Trip not found",
+            )
+        prompt = build_itinerary_prompt(trip.model_dump(mode="json"))
+        prompt += """
+
+Return the itinerary as a JSON array of day objects, not as individual
+activity objects. Each day object must have exactly these keys: "day"
+(integer), "morning" (array), "afternoon" (array), and "evening" (array).
+Each activity object must have exactly these keys: "time", "name",
+"description", and "location". Use empty arrays when a time period has no
+activities. Return only valid JSON with no Markdown or extra text."""
+
+    try:
+        builder = ItineraryBuilder(GroqProvider())
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+
+    try:
+        return await builder.generate_daily_itinerary(prompt)
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(error),
         ) from error
 
 
