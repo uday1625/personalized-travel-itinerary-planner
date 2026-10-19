@@ -1,23 +1,23 @@
-# Create a FastAPI application with CORS middleware, a root endpoint, and a health check endpoint
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware  
-from routers.trips import router as trips_router
+from fastapi.middleware.cors import CORSMiddleware
+
+from trips_router import router
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(trips_router)
+app.include_router(router, prefix="/api")
 
 @app.get("/")
 def read_root():
-    return {"message": "Travel Itinerary Backend is running!"}
+    return {"message": "Travel Planner API is running"}
 
 @app.get("/health")
 def health_check():
