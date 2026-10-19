@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import date, datetime
 from uuid import UUID
 
 import httpx
@@ -31,6 +32,12 @@ class TripCreatedResponse(BaseModel):
 
 class TripResponse(TripCreate):
     trip_id: UUID
+
+
+class TripExportResponse(BaseModel):
+    trip: dict[str, object]
+    itinerary_items: list[dict[str, object]]
+    formatted_summary: str
 
 
 def get_current_user_id(
@@ -99,6 +106,70 @@ class ItineraryActivity(BaseModel):
     estimated_cost: float = Field(ge=0)
     description: str = Field(min_length=1)
     travel_time_to_next: int | None = Field(default=None, ge=10, le=30)
+
+
+def _format_itinerary_summary(
+    trip: dict[str, object],
+    itinerary_items: list[dict[str, object]],
+) -> str:
+    title = str(trip.get("title") or trip.get("destination") or "Trip")
+    lines = [title]
+    if trip.get("destination"):
+        lines.append(f"Destination: {trip['destination']}")
+    if trip.get("start_date") or trip.get("end_date"):
+        lines.append(
+            f"Dates: {trip.get('start_date') or 'TBD'} to {trip.get('end_date') or 'TBD'}"
+        )
+
+    if not itinerary_items:
+        lines.extend(["", "No itinerary items have been added yet."])
+        return "\n".join(lines)
+
+    try:
+        trip_start = date.fromisoformat(str(trip["start_date"]))
+    except (KeyError, TypeError, ValueError):
+        trip_start = None
+
+    lines.append("")
+    for index, item in enumerate(itinerary_items):
+        starts_at_value = item.get("starts_at")
+        try:
+            starts_at = datetime.fromisoformat(
+                str(starts_at_value).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            starts_at = None
+
+        if starts_at is not None and trip_start is not None:
+            day_number = (starts_at.date() - trip_start).days + 1
+            day_number = max(day_number, 1)
+        elif starts_at is not None:
+            day_number = index + 1
+        else:
+            day_number = 1
+
+        if starts_at is None:
+            period = "Schedule"
+            time_label = ""
+        else:
+            hour = starts_at.hour
+            period = "Morning" if hour < 12 else "Afternoon" if hour < 18 else "Evening"
+            time_label = f" ({starts_at.strftime('%H:%M')})"
+
+        activity_name = str(item.get("title") or "Untitled activity")
+        location = item.get("location")
+        description = item.get("description")
+        cost = item.get("estimated_cost")
+        details = [f"Day {day_number}: {period}{time_label} - {activity_name}"]
+        if location:
+            details.append(f"Location: {location}")
+        if description:
+            details.append(str(description))
+        if cost is not None:
+            details.append(f"Estimated cost: {cost}")
+        lines.append("\n".join(details))
+
+    return "\n".join(lines)
 
 
 @router.post(
@@ -294,6 +365,63 @@ def list_trips(user_id: UUID = Depends(get_current_user_id)) -> list[TripRespons
         )
         for row in response.data or []
     ]
+
+
+@router.get(
+    "/trips/{trip_id}/export",
+    response_model=TripExportResponse,
+)
+def export_trip(
+    trip_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+) -> TripExportResponse:
+    """Fetch an owned trip and return its details with a readable summary."""
+    try:
+        client = get_service_client()
+        trip_response = (
+            client.table("trips")
+            .select("*")
+            .eq("id", str(trip_id))
+            .eq("user_id", str(user_id))
+            .maybe_single()
+            .execute()
+        )
+        if not trip_response.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Trip not found",
+            )
+
+        itinerary_response = (
+            client.table("itineraries")
+            .select("*")
+            .eq("trip_id", str(trip_id))
+            .eq("user_id", str(user_id))
+            .order("sort_order")
+            .order("starts_at")
+            .execute()
+        )
+    except HTTPException:
+        raise
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Supabase database is not configured",
+        ) from error
+    except (PostgrestAPIError, httpx.HTTPError) as error:
+        logger.exception("Failed to export trip from Supabase")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to export trip",
+        ) from error
+
+    trip_data = trip_response.data
+    items = itinerary_response.data or []
+    return TripExportResponse(
+        trip=trip_data,
+        itinerary_items=items,
+        formatted_summary=_format_itinerary_summary(trip_data, items),
+    )
 
 
 @router.delete("/trips/{trip_id}", status_code=status.HTTP_204_NO_CONTENT)
