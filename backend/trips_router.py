@@ -9,6 +9,7 @@ from itinerary_service import DayPlan, ItineraryBuilder
 from llm_provider import GroqProvider
 from models import TripCreate
 from prompt_engine import build_itinerary_prompt
+from route_optimizer import optimize_itinerary
 
 router = APIRouter(tags=["trips"])
 
@@ -48,6 +49,7 @@ class ItineraryActivity(BaseModel):
     location: str = Field(min_length=1)
     estimated_cost: float = Field(ge=0)
     description: str = Field(min_length=1)
+    travel_time_to_next: int | None = Field(default=None, ge=10, le=30)
 
 
 @router.post(
@@ -97,7 +99,7 @@ def generate_itinerary_for_trip(
         )
 
     try:
-        return [
+        activities = [
             ItineraryActivity.model_validate(activity)
             for activity in generated_data
         ]
@@ -106,6 +108,21 @@ def generate_itinerary_for_trip(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="The itinerary generator returned an invalid itinerary",
         ) from error
+
+    optimizer_input = [
+        {
+            **activity.model_dump(),
+            "scheduled_time": activity.time,
+        }
+        for activity in activities
+    ]
+    optimized_activities = optimize_itinerary(optimizer_input)
+    return [
+        ItineraryActivity.model_validate(
+            {key: value for key, value in activity.items() if key != "scheduled_time"}
+        )
+        for activity in optimized_activities
+    ]
 
 
 @router.post(
