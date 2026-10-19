@@ -22,6 +22,11 @@ create table if not exists public.trips (
     status text not null default 'planned'
         check (status in ('planned', 'upcoming', 'completed', 'cancelled')),
     notes text,
+    num_travelers integer not null default 1 check (num_travelers >= 1),
+    interests text[] not null default '{}',
+    dietary_needs text[] not null default '{}',
+    travel_pace text not null default 'moderate'
+        check (travel_pace in ('relaxed', 'moderate', 'fast')),
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     check (
@@ -30,6 +35,17 @@ create table if not exists public.trips (
         or end_date >= start_date
     )
 );
+
+alter table public.trips
+    add column if not exists num_travelers integer not null default 1
+        check (num_travelers >= 1);
+alter table public.trips
+    add column if not exists interests text[] not null default '{}';
+alter table public.trips
+    add column if not exists dietary_needs text[] not null default '{}';
+alter table public.trips
+    add column if not exists travel_pace text not null default 'moderate'
+        check (travel_pace in ('relaxed', 'moderate', 'fast'));
 
 create table if not exists public.itineraries (
     id uuid primary key default gen_random_uuid(),

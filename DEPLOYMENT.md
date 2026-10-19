@@ -16,9 +16,10 @@ public URL.
 1. Push the project to GitHub.
 2. In Render, choose **New +** → **Blueprint** and select the repository.
    Render will read the root `render.yaml` and create the API service.
-3. Set the requested `SUPABASE_URL` and `SUPABASE_KEY` environment variables
-   in the Render dashboard. Use the appropriate Supabase key for the backend;
-   never expose a service-role key to the browser.
+3. Set `SUPABASE_URL`, `SUPABASE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and
+   `GROQ_API_KEY` in the Render dashboard. The trip CRUD endpoints verify the
+   caller's access token and scope service-role queries to that user. The
+   service-role key bypasses RLS and must never be exposed to the browser.
 4. Wait for the deploy to complete, then check
    `https://<your-render-service>.onrender.com/health`. Expect
    `{"status":"healthy"}`.

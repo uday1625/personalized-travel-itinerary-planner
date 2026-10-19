@@ -1,10 +1,16 @@
 import json
-from uuid import UUID, uuid4
+import logging
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, ValidationError, model_validator
+from postgrest.exceptions import APIError as PostgrestAPIError
+from supabase_auth.errors import AuthError
 
 from ai_engine import generate_itinerary
+from db_client import get_client, get_service_client
 from itinerary_service import DayPlan, ItineraryBuilder
 from llm_provider import GroqProvider
 from models import TripCreate
@@ -12,6 +18,8 @@ from prompt_engine import build_itinerary_prompt
 from route_optimizer import optimize_itinerary
 
 router = APIRouter(tags=["trips"])
+logger = logging.getLogger(__name__)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 _mock_trips: dict[UUID, TripCreate] = {}
 
@@ -23,6 +31,47 @@ class TripCreatedResponse(BaseModel):
 
 class TripResponse(TripCreate):
     trip_id: UUID
+
+
+def get_current_user_id(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> UUID:
+    """Verify the Supabase bearer token and return its authenticated user ID."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="An Authorization header with a valid access token is required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        auth_response = get_client().auth.get_user(credentials.credentials)
+    except AuthError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired access token",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from error
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Supabase authentication is not configured",
+        ) from error
+    except httpx.HTTPError as error:
+        logger.exception("Supabase token verification failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service is unavailable",
+        ) from error
+
+    if auth_response is None or auth_response.user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired access token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return UUID(auth_response.user.id)
 
 
 class GenerateItineraryRequest(BaseModel):
@@ -57,9 +106,47 @@ class ItineraryActivity(BaseModel):
     response_model=TripCreatedResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_trip(trip: TripCreate) -> TripCreatedResponse:
-    """Save a trip in the process-local mock store."""
-    trip_id = uuid4()
+def create_trip(
+    trip: TripCreate,
+    user_id: UUID = Depends(get_current_user_id),
+) -> TripCreatedResponse:
+    trip_data = trip.model_dump(mode="json")
+    trip_data.update(
+        {
+            "user_id": str(user_id),
+            "title": f"Trip to {trip.destination}",
+        }
+    )
+
+    try:
+        response = (
+            get_service_client()
+            .table("trips")
+            .insert(trip_data)
+            .select("id")
+            .single()
+            .execute()
+        )
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Supabase database is not configured",
+        ) from error
+    except (PostgrestAPIError, httpx.HTTPError) as error:
+        logger.exception("Failed to create trip in Supabase")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to save trip",
+        ) from error
+
+    if not response.data or not response.data.get("id"):
+        logger.error("Supabase trip insert returned no trip ID")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Trip could not be saved",
+        )
+
+    trip_id = UUID(str(response.data["id"]))
     _mock_trips[trip_id] = trip
     return TripCreatedResponse(
         message="Trip created successfully",
@@ -170,9 +257,77 @@ activities. Return only valid JSON with no Markdown or extra text."""
 
 
 @router.get("/trips", response_model=list[TripResponse])
-def list_trips() -> list[TripResponse]:
-    """List trips saved in the process-local mock store."""
+def list_trips(user_id: UUID = Depends(get_current_user_id)) -> list[TripResponse]:
+    """List trips belonging to the authenticated user."""
+    try:
+        response = (
+            get_service_client()
+            .table("trips")
+            .select("*")
+            .eq("user_id", str(user_id))
+            .order("created_at", desc=True)
+            .execute()
+        )
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Supabase database is not configured",
+        ) from error
+    except (PostgrestAPIError, httpx.HTTPError) as error:
+        logger.exception("Failed to fetch trips from Supabase")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to fetch trips",
+        ) from error
+
     return [
-        TripResponse(trip_id=trip_id, **trip.model_dump())
-        for trip_id, trip in _mock_trips.items()
+        TripResponse(
+            trip_id=UUID(str(row["id"])),
+            destination=row["destination"],
+            start_date=row["start_date"],
+            end_date=row["end_date"],
+            budget=row["budget"],
+            num_travelers=row["num_travelers"],
+            interests=row["interests"],
+            dietary_needs=row["dietary_needs"],
+            travel_pace=row["travel_pace"],
+        )
+        for row in response.data or []
     ]
+
+
+@router.delete("/trips/{trip_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_trip(
+    trip_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+) -> Response:
+    """Delete a trip only if it belongs to the authenticated user."""
+    try:
+        response = (
+            get_service_client()
+            .table("trips")
+            .delete()
+            .eq("id", str(trip_id))
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Supabase database is not configured",
+        ) from error
+    except (PostgrestAPIError, httpx.HTTPError) as error:
+        logger.exception("Failed to delete trip from Supabase")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to delete trip",
+        ) from error
+
+    if not response.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found",
+        )
+
+    _mock_trips.pop(trip_id, None)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

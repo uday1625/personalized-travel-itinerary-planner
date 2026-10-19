@@ -1,5 +1,4 @@
-// Create a React component for a Travel Itinerary Planner with a hero section, a feature list, and a footer
-import React from 'react';
+import TripHistory from './components/TripHistory';
 import './App.css';
 
 function App() {
@@ -9,6 +8,8 @@ function App() {
         <h1>Personalized Travel Itinerary Planner</h1>
         <p>Plan your perfect trip with ease and convenience.</p>
       </header>
+
+      <TripHistory />
 
       <section className="features">
         <h2>Features</h2>

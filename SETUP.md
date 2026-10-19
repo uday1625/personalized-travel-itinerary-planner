@@ -18,7 +18,8 @@ cd personalized-travel-itinerary-planner
 
 1. Create a Supabase project and copy its project URL and anon/publishable key.
 2. In the Supabase SQL Editor, run the contents of
-   [`database/schema.sql`](./database/schema.sql).
+   [`database/schema.sql`](./database/schema.sql). If the tables already exist,
+   run the script again to apply the idempotent trip-preference column updates.
 3. Keep any privileged service-role key on the backend only. Never use it in
    frontend code or a `VITE_` environment variable.
 
@@ -30,7 +31,7 @@ From the repository root, create and activate a virtual environment:
 py -m venv backend\venv
 .\backend\venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install fastapi "uvicorn[standard]"
+python -m pip install fastapi "uvicorn[standard]" groq supabase
 ```
 
 If PowerShell blocks activation, you can invoke the virtual environment's
@@ -43,7 +44,11 @@ Copy-Item backend\.env.example backend\.env
 ```
 
 Edit `backend/.env` and set `SUPABASE_URL` and `SUPABASE_KEY` to your project
-values. Do not commit this file.
+values. The trip CRUD endpoints also use `SUPABASE_SERVICE_ROLE_KEY` on the
+backend after verifying the user's access token, and scope every query to that
+user. The service-role key bypasses RLS and must never be exposed to the
+frontend. Set `GROQ_API_KEY` if you plan to use the Groq LLM provider. Do not
+commit this file.
 
 Start the API from the repository root:
 
