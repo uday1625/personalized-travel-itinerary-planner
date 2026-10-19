@@ -1,22 +1,25 @@
-const TRIPS_API_URL = 'http://localhost:8000/api/trips';
+// Ye line backend URL ko .env file se uthayegi. 
+// Agar .env mein nahi mila, toh local testing ke liye localhost use karega.
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-export async function createTrip(tripData) {
-  const response = await fetch(TRIPS_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(tripData),
-  });
+// Example: Create Trip API
+export const createTrip = async (tripData) => {
+    const response = await fetch(`${BASE_URL}/api/trips`, {
+        method: "POST",
+        headers: { 
+            "Content-Type": "application/json" 
+        },
+        body: JSON.stringify(tripData),
+    });
+    
+    if (!response.ok) {
+        throw new Error("Failed to create trip");
+    }
+    return response.json();
+};
 
-  const responseData = await response.json();
-
-  if (!response.ok) {
-    const message =
-      responseData.detail ?? `Trip creation failed with status ${response.status}.`;
-    throw new Error(message);
-  }
-
-  return responseData;
-}
+// Example: Get Trips API
+export const getTrips = async () => {
+    const response = await fetch(`${BASE_URL}/api/trips`);
+    return response.json();
+};
